@@ -5,18 +5,19 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+
+import 'package:flutter_test/flutter_test.dart';
 
 Future<void> pumpTest(
   WidgetTester tester,
-  TargetPlatform platform, {
+  TargetPlatform? platform, {
   bool scrollable = true,
   bool reverse = false,
-  ScrollController controller,
-  Widget Function(Widget) wrapper,
+  ScrollController? controller,
 }) async {
   await tester.pumpWidget(MaterialApp(
     theme: ThemeData(
@@ -80,7 +81,7 @@ double getScrollOffset(WidgetTester tester, {bool last = true}) {
 double getScrollVelocity(WidgetTester tester) {
   final RenderViewport viewport = tester.renderObject(find.byType(Viewport));
   final ScrollPosition position = viewport.offset as ScrollPosition;
-  return position.activity.velocity;
+  return position.activity!.velocity;
 }
 
 void resetScrollOffset(WidgetTester tester) {
@@ -180,8 +181,7 @@ void main() {
     await tester.pump();
     // The only applied velocity to the scrollable is the second fling that was in the
     // opposite direction.
-    expect(getScrollVelocity(tester), greaterThan(-1000.0));
-    expect(getScrollVelocity(tester), lessThan(0.0));
+    expect(getScrollVelocity(tester), -1000.0);
   }, variant: const TargetPlatformVariant(<TargetPlatform>{ TargetPlatform.iOS,  TargetPlatform.macOS }));
 
   testWidgets('No iOS/macOS momentum kept on hold gestures', (WidgetTester tester) async {
@@ -267,7 +267,7 @@ void main() {
     expect(getScrollOffset(tester), 30.0);
     await gesture.moveBy(const Offset(0.0, -0.5), timeStamp: const Duration(milliseconds: 20));
     expect(getScrollOffset(tester), 30.5);
-    await gesture.moveBy(Offset.zero);
+    await gesture.moveBy(Offset.zero, timeStamp: const Duration(milliseconds: 21));
     // Stationary too long, threshold reset.
     await gesture.moveBy(Offset.zero, timeStamp: const Duration(milliseconds: 120));
     await gesture.moveBy(const Offset(0.0, -1.0), timeStamp: const Duration(milliseconds: 140));
@@ -289,11 +289,10 @@ void main() {
     final TestPointer testPointer = TestPointer(1, ui.PointerDeviceKind.mouse);
     // Create a hover event so that |testPointer| has a location when generating the scroll.
     testPointer.hover(scrollEventLocation);
-    final HitTestResult result = tester.hitTestOnBinding(scrollEventLocation);
-    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)), result);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)));
     expect(getScrollOffset(tester), 20.0);
     // Pointer signals should not cause overscroll.
-    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -30.0)), result);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -30.0)));
     expect(getScrollOffset(tester), 0.0);
   });
 
@@ -307,11 +306,10 @@ void main() {
     final TestPointer testPointer = TestPointer(1, ui.PointerDeviceKind.mouse);
     // Create a hover event so that |testPointer| has a location when generating the scroll.
     testPointer.hover(scrollEventLocation);
-    final HitTestResult result = tester.hitTestOnBinding(scrollEventLocation);
-    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)), result);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)));
     expect(getScrollOffset(tester, last: true), 20.0);
     // Pointer signals should not cause overscroll.
-    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -30.0)), result);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -30.0)));
     expect(getScrollOffset(tester, last: true), 0.0);
   });
 
@@ -321,10 +319,42 @@ void main() {
     final TestPointer testPointer = TestPointer(1, ui.PointerDeviceKind.mouse);
     // Create a hover event so that |testPointer| has a location when generating the scroll.
     testPointer.hover(scrollEventLocation);
-    final HitTestResult result = tester.hitTestOnBinding(scrollEventLocation);
-    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)), result);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)));
     expect(getScrollOffset(tester), 0.0);
   });
+
+  testWidgets('Holding scroll and Scroll pointer signal will update ScrollDirection.forward / ScrollDirection.reverse', (WidgetTester tester) async {
+    ScrollDirection? lastUserScrollingDirection;
+
+    final ScrollController controller = ScrollController();
+    await pumpTest(tester, TargetPlatform.fuchsia, controller: controller);
+
+    controller.addListener(() {
+      if(controller.position.userScrollDirection != ScrollDirection.idle)
+        lastUserScrollingDirection = controller.position.userScrollDirection;
+    });
+
+    await tester.drag(find.byType(Viewport), const Offset(0.0, -20.0), touchSlopY: 0.0);
+
+    expect(lastUserScrollingDirection, ScrollDirection.reverse);
+
+    final Offset scrollEventLocation = tester.getCenter(find.byType(Viewport));
+    final TestPointer testPointer = TestPointer(1, ui.PointerDeviceKind.mouse);
+    // Create a hover event so that |testPointer| has a location when generating the scroll.
+    testPointer.hover(scrollEventLocation);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)));
+
+    expect(lastUserScrollingDirection, ScrollDirection.reverse);
+
+    await tester.drag(find.byType(Viewport), const Offset(0.0, 20.0), touchSlopY: 0.0);
+
+    expect(lastUserScrollingDirection, ScrollDirection.forward);
+
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -20.0)));
+
+    expect(lastUserScrollingDirection, ScrollDirection.forward);
+  });
+
 
   testWidgets('Scrolls in correct direction when scroll axis is reversed', (WidgetTester tester) async {
     await pumpTest(tester, TargetPlatform.fuchsia, reverse: true);
@@ -333,10 +363,85 @@ void main() {
     final TestPointer testPointer = TestPointer(1, ui.PointerDeviceKind.mouse);
     // Create a hover event so that |testPointer| has a location when generating the scroll.
     testPointer.hover(scrollEventLocation);
-    final HitTestResult result = tester.hitTestOnBinding(scrollEventLocation);
-    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -20.0)), result);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -20.0)));
 
     expect(getScrollOffset(tester), 20.0);
+  });
+
+  group('setCanDrag to false with active drag gesture: ', () {
+    Future<void> pumpTestWidget(WidgetTester tester, { required bool canDrag }) {
+      return tester.pumpWidget(
+        MaterialApp(
+          home: CustomScrollView(
+            physics: canDrag ? const AlwaysScrollableScrollPhysics() : const NeverScrollableScrollPhysics(),
+            slivers: <Widget>[SliverToBoxAdapter(
+              child: SizedBox(
+                height: 2000,
+                child: GestureDetector(onTap: () {},),
+              ),
+            )],
+          ),
+        ),
+      );
+    }
+
+    testWidgets('Hold does not disable user interaction', (WidgetTester tester) async {
+      // Regression test for https://github.com/flutter/flutter/issues/66816.
+      await pumpTestWidget(tester, canDrag: true);
+      final RenderIgnorePointer renderIgnorePointer = tester.renderObject<RenderIgnorePointer>(
+        find.descendant(of: find.byType(CustomScrollView), matching: find.byType(IgnorePointer)),
+      );
+
+      expect(renderIgnorePointer.ignoring, false);
+
+      final TestGesture gesture = await tester.startGesture(tester.getCenter(find.byType(Viewport)));
+      expect(renderIgnorePointer.ignoring, false);
+
+      await pumpTestWidget(tester, canDrag: false);
+      expect(renderIgnorePointer.ignoring, false);
+
+      await gesture.up();
+      expect(renderIgnorePointer.ignoring, false);
+    });
+
+    testWidgets('Drag disables user interaction when recognized', (WidgetTester tester) async {
+      // Regression test for https://github.com/flutter/flutter/issues/66816.
+      await pumpTestWidget(tester, canDrag: true);
+      final RenderIgnorePointer renderIgnorePointer = tester.renderObject<RenderIgnorePointer>(
+        find.descendant(of: find.byType(CustomScrollView), matching: find.byType(IgnorePointer)),
+      );
+      expect(renderIgnorePointer.ignoring, false);
+
+      final TestGesture gesture = await tester.startGesture(tester.getCenter(find.byType(Viewport)));
+      expect(renderIgnorePointer.ignoring, false);
+
+      await gesture.moveBy(const Offset(0, -100));
+      // Starts ignoring when the drag is recognized.
+      expect(renderIgnorePointer.ignoring, true);
+
+      await pumpTestWidget(tester, canDrag: false);
+      expect(renderIgnorePointer.ignoring, false);
+
+      await gesture.up();
+      expect(renderIgnorePointer.ignoring, false);
+    });
+
+    testWidgets('Ballistic disables user interaction until it stops', (WidgetTester tester) async {
+      await pumpTestWidget(tester, canDrag: true);
+      final RenderIgnorePointer renderIgnorePointer = tester.renderObject<RenderIgnorePointer>(
+        find.descendant(of: find.byType(CustomScrollView), matching: find.byType(IgnorePointer)),
+      );
+      expect(renderIgnorePointer.ignoring, false);
+
+      // Starts ignoring when the drag is recognized.
+      await tester.fling(find.byType(Viewport), const Offset(0, -100), 1000);
+      expect(renderIgnorePointer.ignoring, true);
+      await tester.pump();
+
+      // When the activity ends we should stop ignoring pointers.
+      await tester.pumpAndSettle();
+      expect(renderIgnorePointer.ignoring, false);
+    });
   });
 
   testWidgets("Keyboard scrolling doesn't happen if scroll physics are set to NeverScrollableScrollPhysics", (WidgetTester tester) async {
@@ -387,11 +492,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 800.0, 50.0)));
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Vertical scrollables are scrolled when activated via keyboard.', (WidgetTester tester) async {
     final ScrollController controller = ScrollController();
@@ -420,14 +521,20 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 800.0, 50.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    // We exclude the modifier keys here for web testing since default web shortcuts
+    // do not use a modifier key with arrow keys for ScrollActions.
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, -50.0, 800.0, 0.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 800.0, 50.0)));
     await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
@@ -436,11 +543,7 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 800.0, 50.0)));
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Horizontal scrollables are scrolled when activated via keyboard.', (WidgetTester tester) async {
     final ScrollController controller = ScrollController();
@@ -470,21 +573,23 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 50.0, 600.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    // We exclude the modifier keys here for web testing since default web shortcuts
+    // do not use a modifier key with arrow keys for ScrollActions.
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(-50.0, 0.0, 0.0, 600.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 50.0, 600.0)));
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Horizontal scrollables are scrolled the correct direction in RTL locales.', (WidgetTester tester) async {
     final ScrollController controller = ScrollController();
@@ -517,21 +622,23 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(750.0, 0.0, 800.0, 600.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    // We exclude the modifier keys here for web testing since default web shortcuts
+    // do not use a modifier key with arrow keys for ScrollActions.
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(800.0, 0.0, 850.0, 600.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(750.0, 0.0, 800.0, 600.0)));
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Reversed vertical scrollables are scrolled when activated via keyboard.', (WidgetTester tester) async {
     final ScrollController controller = ScrollController();
@@ -563,14 +670,20 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 550.0, 800.0, 600.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    // We exclude the modifier keys here for web testing since default web shortcuts
+    // do not use a modifier key with arrow keys for ScrollActions.
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 600.0, 800.0, 650.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 550.0, 800.0, 600.0)));
     await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
@@ -579,11 +692,7 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 550.0, 800.0, 600.0)));
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Reversed horizontal scrollables are scrolled when activated via keyboard.', (WidgetTester tester) async {
     final ScrollController controller = ScrollController();
@@ -616,20 +725,22 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(750.0, 0.0, 800.0, 600.00)));
-    await tester.sendKeyDownEvent(modifierKey);
+    // We exclude the modifier keys here for web testing since default web shortcuts
+    // do not use a modifier key with arrow keys for ScrollActions.
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
     expect(tester.getRect(find.byKey(const ValueKey<String>('Box 0'), skipOffstage: false)), equals(const Rect.fromLTRB(800.0, 0.0, 850.0, 600.0)));
-    await tester.sendKeyDownEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyDownEvent(modifierKey);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.sendKeyUpEvent(modifierKey);
+    if (!kIsWeb)
+      await tester.sendKeyUpEvent(modifierKey);
     await tester.pumpAndSettle();
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Custom scrollables with a center sliver are scrolled when activated via keyboard.', (WidgetTester tester) async {
     final ScrollController controller = ScrollController();
@@ -666,28 +777,30 @@ void main() {
     expect(controller.position.pixels, equals(0.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Item 10'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 0.0, 800.0, 100.0)));
     for (int i = 0; i < 10; ++i) {
-      await tester.sendKeyDownEvent(modifierKey);
+      // We exclude the modifier keys here for web testing since default web shortcuts
+      // do not use a modifier key with arrow keys for ScrollActions.
+      if (!kIsWeb)
+        await tester.sendKeyDownEvent(modifierKey);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-      await tester.sendKeyUpEvent(modifierKey);
+      if (!kIsWeb)
+        await tester.sendKeyUpEvent(modifierKey);
       await tester.pumpAndSettle();
     }
     // Starts at #10 already, so doesn't work out to 500.0 because it hits bottom.
     expect(controller.position.pixels, equals(400.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Item 10'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, -400.0, 800.0, -300.0)));
     for (int i = 0; i < 10; ++i) {
-      await tester.sendKeyDownEvent(modifierKey);
+      if (!kIsWeb)
+        await tester.sendKeyDownEvent(modifierKey);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-      await tester.sendKeyUpEvent(modifierKey);
+      if (!kIsWeb)
+        await tester.sendKeyUpEvent(modifierKey);
       await tester.pumpAndSettle();
     }
     // Goes up two past "center" where it started, so negative.
     expect(controller.position.pixels, equals(-100.0));
     expect(tester.getRect(find.byKey(const ValueKey<String>('Item 10'), skipOffstage: false)), equals(const Rect.fromLTRB(0.0, 100.0, 800.0, 200.0)));
-
-    // TODO(gspencergoog): Once we can test against TargetPlatform.macOS instead
-    // of Platform.isMacOS, don't skip this on web anymore.
-    // https://github.com/flutter/flutter/issues/31366
-  }, skip: kIsWeb);
+  });
 
   testWidgets('Can recommendDeferredLoadingForContext - animation', (WidgetTester tester) async {
     final List<String> widgetTracker = <String>[];
@@ -771,7 +884,7 @@ void main() {
     // Getting the tester to simulate a life-like fling is difficult.
     // Instead, just manually drive the activity with a ballistic simulation as
     // if the user has flung the list.
-    Scrollable.of(find.byType(SizedBox).evaluate().first).position.activity.delegate.goBallistic(4000);
+    Scrollable.of(find.byType(SizedBox).evaluate().first)!.position.activity!.delegate.goBallistic(4000);
 
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey<String>('Box 0')), findsNothing);
@@ -800,7 +913,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    final ScrollPosition position = Scrollable.of(find.byType(SizedBox).evaluate().first).position;
+    final ScrollPosition position = Scrollable.of(find.byType(SizedBox).evaluate().first)!.position;
     final SuperPessimisticScrollPhysics physics = position.physics as SuperPessimisticScrollPhysics;
 
     expect(find.byKey(const ValueKey<String>('Box 0')), findsOneWidget);
@@ -813,7 +926,7 @@ void main() {
     // Getting the tester to simulate a life-like fling is difficult.
     // Instead, just manually drive the activity with a ballistic simulation as
     // if the user has flung the list.
-    position.activity.delegate.goBallistic(4000);
+    position.activity!.delegate.goBallistic(4000);
 
     await tester.pumpAndSettle();
 
@@ -844,7 +957,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    final ScrollPosition position = Scrollable.of(find.byType(SizedBox).evaluate().first).position;
+    final ScrollPosition position = Scrollable.of(find.byType(SizedBox).evaluate().first)!.position;
 
     expect(find.byKey(const ValueKey<String>('Cheap box 0')), findsOneWidget);
     expect(find.byKey(const ValueKey<String>('Cheap box 52')), findsNothing);
@@ -855,7 +968,7 @@ void main() {
     // Getting the tester to simulate a life-like fling is difficult.
     // Instead, just manually drive the activity with a ballistic simulation as
     // if the user has flung the list.
-    position.activity.delegate.goBallistic(4000);
+    position.activity!.delegate.goBallistic(4000);
 
     await tester.pumpAndSettle();
 
@@ -865,11 +978,239 @@ void main() {
     expect(expensiveWidgets, 0);
     expect(cheapWidgets, 58);
   });
+
+  testWidgets('ensureVisible does not move PageViews', (WidgetTester tester) async {
+    final PageController controller = PageController();
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: PageView(
+          controller: controller,
+          children: List<ListView>.generate(
+            3,
+            (int pageIndex) {
+              return ListView(
+                key: Key('list_$pageIndex'),
+                children: List<Widget>.generate(
+                  100,
+                  (int listIndex) {
+                    return Row(
+                      children: <Widget>[
+                        Container(
+                          key: Key('${pageIndex}_${listIndex}_0'),
+                          color: Colors.red,
+                          width: 200,
+                          height: 10,
+                        ),
+                        Container(
+                          key: Key('${pageIndex}_${listIndex}_1'),
+                          color: Colors.blue,
+                          width: 200,
+                          height: 10,
+                        ),
+                        Container(
+                          key: Key('${pageIndex}_${listIndex}_2'),
+                          color: Colors.green,
+                          width: 200,
+                          height: 10,
+                        ),
+                      ]
+                    );
+                  }
+                ),
+              );
+            }
+          )
+        ),
+      ),
+    );
+
+    final Finder targetMidRightPage0 = find.byKey(const Key('0_25_2'));
+    final Finder targetMidRightPage1 = find.byKey(const Key('1_25_2'));
+    final Finder targetMidLeftPage1 = find.byKey(const Key('1_25_0'));
+
+    expect(find.byKey(const Key('list_0')), findsOneWidget);
+    expect(find.byKey(const Key('list_1')), findsNothing);
+    expect(targetMidRightPage0, findsOneWidget);
+    expect(targetMidRightPage1, findsNothing);
+    expect(targetMidLeftPage1, findsNothing);
+
+    await tester.ensureVisible(targetMidRightPage0);
+    await tester.pumpAndSettle();
+    expect(targetMidRightPage0, findsOneWidget);
+    expect(targetMidRightPage1, findsNothing);
+    expect(targetMidLeftPage1, findsNothing);
+
+    controller.jumpToPage(1);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('list_0')), findsNothing);
+    expect(find.byKey(const Key('list_1')), findsOneWidget);
+    await tester.ensureVisible(targetMidRightPage1);
+    await tester.pumpAndSettle();
+
+    expect(targetMidRightPage0, findsNothing);
+    expect(targetMidRightPage1, findsOneWidget);
+    expect(targetMidLeftPage1, findsOneWidget);
+
+    await tester.ensureVisible(targetMidLeftPage1);
+    await tester.pumpAndSettle();
+
+    expect(targetMidRightPage0, findsNothing);
+    expect(targetMidRightPage1, findsOneWidget);
+    expect(targetMidLeftPage1, findsOneWidget);
+  });
+
+  testWidgets('ensureVisible does not move TabViews', (WidgetTester tester) async {
+    final TickerProvider vsync = TestTickerProvider();
+    final TabController controller = TabController(
+      length: 3,
+      vsync: vsync,
+    );
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: TabBarView(
+          controller: controller,
+          children: List<ListView>.generate(
+            3,
+            (int pageIndex) {
+              return ListView(
+                key: Key('list_$pageIndex'),
+                children: List<Widget>.generate(
+                  100,
+                  (int listIndex) {
+                    return Row(
+                      children: <Widget>[
+                        Container(
+                          key: Key('${pageIndex}_${listIndex}_0'),
+                          color: Colors.red,
+                          width: 200,
+                          height: 10,
+                        ),
+                        Container(
+                          key: Key('${pageIndex}_${listIndex}_1'),
+                          color: Colors.blue,
+                          width: 200,
+                          height: 10,
+                        ),
+                        Container(
+                          key: Key('${pageIndex}_${listIndex}_2'),
+                          color: Colors.green,
+                          width: 200,
+                          height: 10,
+                        ),
+                      ]
+                    );
+                  }
+                ),
+              );
+            }
+          )
+        ),
+      ),
+    );
+
+    final Finder targetMidRightPage0 = find.byKey(const Key('0_25_2'));
+    final Finder targetMidRightPage1 = find.byKey(const Key('1_25_2'));
+    final Finder targetMidLeftPage1 = find.byKey(const Key('1_25_0'));
+
+    expect(find.byKey(const Key('list_0')), findsOneWidget);
+    expect(find.byKey(const Key('list_1')), findsNothing);
+    expect(targetMidRightPage0, findsOneWidget);
+    expect(targetMidRightPage1, findsNothing);
+    expect(targetMidLeftPage1, findsNothing);
+
+    await tester.ensureVisible(targetMidRightPage0);
+    await tester.pumpAndSettle();
+    expect(targetMidRightPage0, findsOneWidget);
+    expect(targetMidRightPage1, findsNothing);
+    expect(targetMidLeftPage1, findsNothing);
+
+    controller.index = 1;
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('list_0')), findsNothing);
+    expect(find.byKey(const Key('list_1')), findsOneWidget);
+    await tester.ensureVisible(targetMidRightPage1);
+    await tester.pumpAndSettle();
+
+    expect(targetMidRightPage0, findsNothing);
+    expect(targetMidRightPage1, findsOneWidget);
+    expect(targetMidLeftPage1, findsOneWidget);
+
+    await tester.ensureVisible(targetMidLeftPage1);
+    await tester.pumpAndSettle();
+
+    expect(targetMidRightPage0, findsNothing);
+    expect(targetMidRightPage1, findsOneWidget);
+    expect(targetMidLeftPage1, findsOneWidget);
+  });
+
+  testWidgets('PointerScroll on nested NeverScrollable ListView goes to outer Scrollable.', (WidgetTester tester) async {
+    // Regression test for https://github.com/flutter/flutter/issues/70948
+    final ScrollController outerController = ScrollController();
+    final ScrollController innerController = ScrollController();
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(
+          controller: outerController,
+          child: Container(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: <Widget>[
+                Column(
+                  children: <Widget>[
+                    for (int i = 0; i < 100; i++)
+                      Text('SingleChildScrollView $i'),
+                  ]
+                ),
+                Container(
+                  height: 3000,
+                  width: 400,
+                  child: ListView.builder(
+                    controller: innerController,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: 100,
+                    itemBuilder: (BuildContext context, int index) {
+                      return Text('Nested NeverScrollable ListView $index');
+                    },
+                  )
+                ),
+              ]
+            )
+          )
+        )
+      ),
+    ));
+    expect(outerController.position.pixels, 0.0);
+    expect(innerController.position.pixels, 0.0);
+    final Offset outerScrollable = tester.getCenter(find.text('SingleChildScrollView 3'));
+    final TestPointer testPointer = TestPointer(1, ui.PointerDeviceKind.mouse);
+    // Hover over the outer scroll view and create a pointer scroll.
+    testPointer.hover(outerScrollable);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, 20.0)));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(outerController.position.pixels, 20.0);
+    expect(innerController.position.pixels, 0.0);
+
+    final Offset innerScrollable = tester.getCenter(find.text('Nested NeverScrollable ListView 20'));
+    // Hover over the inner scroll view and create a pointer scroll.
+    // This inner scroll view is not scrollable, and so the outer should scroll.
+    testPointer.hover(innerScrollable);
+    await tester.sendEventToBinding(testPointer.scroll(const Offset(0.0, -20.0)));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(outerController.position.pixels, 0.0);
+    expect(innerController.position.pixels, 0.0);
+  });
 }
 
 // ignore: must_be_immutable
 class SuperPessimisticScrollPhysics extends ScrollPhysics {
-  SuperPessimisticScrollPhysics({ScrollPhysics parent}) : super(parent: parent);
+  SuperPessimisticScrollPhysics({ScrollPhysics? parent}) : super(parent: parent);
 
   int count = 0;
 
@@ -880,13 +1221,13 @@ class SuperPessimisticScrollPhysics extends ScrollPhysics {
   }
 
   @override
-  ScrollPhysics applyTo(ScrollPhysics ancestor) {
+  ScrollPhysics applyTo(ScrollPhysics? ancestor) {
     return SuperPessimisticScrollPhysics(parent: buildParent(ancestor));
   }
 }
 
 class ExtraSuperPessimisticScrollPhysics extends ScrollPhysics {
-  const ExtraSuperPessimisticScrollPhysics({ScrollPhysics parent}) : super(parent: parent);
+  const ExtraSuperPessimisticScrollPhysics({ScrollPhysics? parent}) : super(parent: parent);
 
   @override
   bool recommendDeferredLoading(double velocity, ScrollMetrics metrics, BuildContext context) {
@@ -894,7 +1235,14 @@ class ExtraSuperPessimisticScrollPhysics extends ScrollPhysics {
   }
 
   @override
-  ScrollPhysics applyTo(ScrollPhysics ancestor) {
+  ScrollPhysics applyTo(ScrollPhysics? ancestor) {
     return ExtraSuperPessimisticScrollPhysics(parent: buildParent(ancestor));
+  }
+}
+
+class TestTickerProvider extends TickerProvider {
+  @override
+  Ticker createTicker(TickerCallback onTick) {
+    return Ticker(onTick);
   }
 }

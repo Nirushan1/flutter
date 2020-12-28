@@ -8,7 +8,6 @@ import 'dart:math';
 import 'package:collection/collection.dart';
 import 'package:meta/meta.dart';
 import 'package:vector_math/vector_math_64.dart';
-import 'package:xml/xml.dart' as xml show parse;
 import 'package:xml/xml.dart' hide parse;
 
 // String to use for a single indentation.
@@ -78,7 +77,7 @@ class PathAnimation {
     final List<PathCommandAnimation> commands = <PathCommandAnimation>[];
     for (int commandIdx = 0; commandIdx < frames[0].paths[pathIdx].commands.length; commandIdx += 1) {
       final int numPointsInCommand = frames[0].paths[pathIdx].commands[commandIdx].points.length;
-      final List<List<Point<double>>> points = List<List<Point<double>>>(numPointsInCommand);
+      final List<List<Point<double>>> points = List<List<Point<double>>>.filled(numPointsInCommand, null);
       for (int j = 0; j < numPointsInCommand; j += 1)
         points[j] = <Point<double>>[];
       final String commandType = frames[0].paths[pathIdx].commands[commandIdx].type;
@@ -190,7 +189,7 @@ class PathCommandAnimation {
 FrameData interpretSvg(String svgFilePath) {
   final File file = File(svgFilePath);
   final String fileData = file.readAsStringSync();
-  final XmlElement svgElement = _extractSvgElement(xml.parse(fileData));
+  final XmlElement svgElement = _extractSvgElement(XmlDocument.parse(fileData));
   final double width = parsePixels(_extractAttr(svgElement, 'width')).toDouble();
   final double height = parsePixels(_extractAttr(svgElement, 'height')).toDouble();
 
@@ -260,6 +259,7 @@ List<Point<double>> parsePoints(String points) {
 }
 
 /// Data for a single animation frame.
+@immutable
 class FrameData {
   const FrameData(this.size, this.paths);
 
@@ -285,6 +285,7 @@ class FrameData {
 }
 
 /// Represents an SVG path element.
+@immutable
 class SvgPath {
   const SvgPath(this.id, this.commands, {this.opacity = 1.0});
 
@@ -348,6 +349,7 @@ class SvgPath {
 ///   * "Z" => SvgPathCommand('Z', [])
 ///   * "C 1.0, 1.0 2.0, 2.0 3.0, 3.0" SvgPathCommand('C', [Point(1.0, 1.0),
 ///      Point(2.0, 2.0), Point(3.0, 3.0)])
+@immutable
 class SvgPathCommand {
   const SvgPathCommand(this.type, this.points);
 
@@ -420,7 +422,7 @@ class SvgPathCommandBuilder {
 }
 
 List<double> _pointsToVector3Array(List<Point<double>> points) {
-  final List<double> result = List<double>(points.length * 3);
+  final List<double> result = List<double>.filled(points.length * 3, null);
   for (int i = 0; i < points.length; i += 1) {
     result[i * 3] = points[i].x;
     result[i * 3 + 1] = points[i].y;
@@ -431,7 +433,7 @@ List<double> _pointsToVector3Array(List<Point<double>> points) {
 
 List<Point<double>> _vector3ArrayToPoints(List<double> vector) {
   final int numPoints = (vector.length / 3).floor();
-  final List<Point<double>> points = List<Point<double>>(numPoints);
+  final List<Point<double>> points = List<Point<double>>.filled(numPoints, null);
   for (int i = 0; i < numPoints; i += 1) {
     points[i] = Point<double>(vector[i*3], vector[i*3 + 1]);
   }

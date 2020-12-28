@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'dart:async';
+import 'package:vm_service/vm_service.dart' as vm_service;
 
 import '../base/common.dart';
 import '../base/file_system.dart';
@@ -49,6 +49,7 @@ class ScreenshotCommand extends FlutterCommand {
       },
       defaultsTo: _kDeviceType,
     );
+    usesDeviceTimeoutOption();
   }
 
   @override
@@ -75,6 +76,9 @@ class ScreenshotCommand extends FlutterCommand {
       default:
         if (observatoryUri == null) {
           throwToolExit('Observatory URI must be specified for screenshot type $screenshotType');
+        }
+        if (observatoryUri.isEmpty || Uri.tryParse(observatoryUri) == null) {
+          throwToolExit('Observatory URI "$observatoryUri" is invalid');
         }
     }
   }
@@ -123,37 +127,35 @@ class ScreenshotCommand extends FlutterCommand {
   }
 
   Future<void> runSkia(File outputFile) async {
-    final Map<String, dynamic> skp = await _invokeVmServiceRpc('_flutter.screenshotSkp');
+    final Uri observatoryUri = Uri.parse(stringArg(_kObservatoryUri));
+    final vm_service.VmService vmService = await connectToVmService(observatoryUri);
+    final vm_service.Response skp = await vmService.screenshotSkp();
     outputFile ??= globals.fsUtils.getUniqueFile(
       globals.fs.currentDirectory,
       'flutter',
       'skp',
     );
     final IOSink sink = outputFile.openWrite();
-    sink.add(base64.decode(skp['skp'] as String));
+    sink.add(base64.decode(skp.json['skp'] as String));
     await sink.close();
     _showOutputFileInfo(outputFile);
     _ensureOutputIsNotJsonRpcError(outputFile);
   }
 
   Future<void> runRasterizer(File outputFile) async {
-    final Map<String, dynamic> response = await _invokeVmServiceRpc('_flutter.screenshot');
+    final Uri observatoryUri = Uri.parse(stringArg(_kObservatoryUri));
+    final vm_service.VmService vmService = await connectToVmService(observatoryUri);
+    final vm_service.Response response = await vmService.screenshot();
     outputFile ??= globals.fsUtils.getUniqueFile(
       globals.fs.currentDirectory,
       'flutter',
       'png',
     );
     final IOSink sink = outputFile.openWrite();
-    sink.add(base64.decode(response['screenshot'] as String));
+    sink.add(base64.decode(response.json['screenshot'] as String));
     await sink.close();
     _showOutputFileInfo(outputFile);
     _ensureOutputIsNotJsonRpcError(outputFile);
-  }
-
-  Future<Map<String, dynamic>> _invokeVmServiceRpc(String method) async {
-    final Uri observatoryUri = Uri.parse(stringArg(_kObservatoryUri));
-    final VMService vmService = await VMService.connect(observatoryUri);
-    return await vmService.vm.invokeRpcRaw(method);
   }
 
   void _ensureOutputIsNotJsonRpcError(File outputFile) {

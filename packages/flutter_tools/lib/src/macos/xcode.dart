@@ -5,47 +5,40 @@
 import 'dart:async';
 
 import 'package:meta/meta.dart';
-import 'package:platform/platform.dart';
 import 'package:process/process.dart';
 
+import '../artifacts.dart';
 import '../base/common.dart';
 import '../base/file_system.dart';
 import '../base/io.dart';
 import '../base/logger.dart';
+import '../base/platform.dart';
 import '../base/process.dart';
 import '../build_info.dart';
+import '../cache.dart';
 import '../convert.dart';
 import '../globals.dart' as globals;
 import '../ios/devices.dart';
+import '../ios/ios_deploy.dart';
+import '../ios/iproxy.dart';
+import '../ios/mac.dart';
 import '../ios/xcodeproj.dart';
 import '../reporting/reporting.dart';
 
 const int kXcodeRequiredVersionMajor = 11;
 const int kXcodeRequiredVersionMinor = 0;
-
-enum SdkType {
-  iPhone,
-  iPhoneSimulator,
-  macOS,
-}
+const int kXcodeRequiredVersionPatch = 0;
 
 /// SDK name passed to `xcrun --sdk`. Corresponds to undocumented Xcode
 /// SUPPORTED_PLATFORMS values.
 ///
 /// Usage: xcrun [options] <tool name> ... arguments ...
 /// ...
-/// --sdk <sdk name>            find the tool for the given SDK name
-String getNameForSdk(SdkType sdk) {
-  switch (sdk) {
-    case SdkType.iPhone:
-      return 'iphoneos';
-    case SdkType.iPhoneSimulator:
-      return 'iphonesimulator';
-    case SdkType.macOS:
-      return 'macosx';
-  }
-  assert(false);
-  return null;
+/// --sdk <sdk name>            find the tool for the given SDK name.
+String getSDKNameForIOSEnvironmentType(EnvironmentType environmentType) {
+  return (environmentType == EnvironmentType.simulator)
+      ? 'iphonesimulator'
+      : 'iphoneos';
 }
 
 /// A utility class for interacting with Xcode command line tools.
@@ -56,10 +49,11 @@ class Xcode {
     @required Logger logger,
     @required FileSystem fileSystem,
     @required XcodeProjectInterpreter xcodeProjectInterpreter,
-  }) : _platform = platform,
-       _fileSystem = fileSystem,
-       _xcodeProjectInterpreter = xcodeProjectInterpreter,
-       _processUtils = ProcessUtils(logger: logger, processManager: processManager);
+  })  : _platform = platform,
+        _fileSystem = fileSystem,
+        _xcodeProjectInterpreter = xcodeProjectInterpreter,
+        _processUtils =
+            ProcessUtils(logger: logger, processManager: processManager);
 
   final Platform _platform;
   final ProcessUtils _processUtils;
@@ -92,8 +86,8 @@ class Xcode {
   }
 
   int get majorVersion => _xcodeProjectInterpreter.majorVersion;
-
   int get minorVersion => _xcodeProjectInterpreter.minorVersion;
+  int get patchVersion => _xcodeProjectInterpreter.patchVersion;
 
   String get versionText => _xcodeProjectInterpreter.versionText;
 
@@ -103,7 +97,7 @@ class Xcode {
     if (_eulaSigned == null) {
       try {
         final RunResult result = _processUtils.runSync(
-          <String>['/usr/bin/xcrun', 'clang'],
+          <String>[...xcrunCommand(), 'clang'],
         );
         if (result.stdout != null && result.stdout.contains('license')) {
           _eulaSigned = false;
@@ -128,7 +122,7 @@ class Xcode {
         // This command will error if additional components need to be installed in
         // xcode 9.2 and above.
         final RunResult result = _processUtils.runSync(
-          <String>['/usr/bin/xcrun', 'simctl', 'list'],
+          <String>[...xcrunCommand(), 'simctl', 'list'],
         );
         _isSimctlInstalled = result.stderr == null || result.stderr == '';
       } on ProcessException {
@@ -146,29 +140,35 @@ class Xcode {
       return true;
     }
     if (majorVersion == kXcodeRequiredVersionMajor) {
+      if (minorVersion == kXcodeRequiredVersionMinor) {
+        return patchVersion >= kXcodeRequiredVersionPatch;
+      }
       return minorVersion >= kXcodeRequiredVersionMinor;
     }
     return false;
   }
 
+  /// See [XcodeProjectInterpreter.xcrunCommand].
+  List<String> xcrunCommand() => _xcodeProjectInterpreter.xcrunCommand();
+
   Future<RunResult> cc(List<String> args) {
     return _processUtils.run(
-      <String>['xcrun', 'cc', ...args],
+      <String>[...xcrunCommand(), 'cc', ...args],
       throwOnError: true,
     );
   }
 
   Future<RunResult> clang(List<String> args) {
     return _processUtils.run(
-      <String>['xcrun', 'clang', ...args],
+      <String>[...xcrunCommand(), 'clang', ...args],
       throwOnError: true,
     );
   }
 
-  Future<String> sdkLocation(SdkType sdk) async {
-    assert(sdk != null);
+  Future<String> sdkLocation(EnvironmentType environmentType) async {
+    assert(environmentType != null);
     final RunResult runResult = await _processUtils.run(
-      <String>['xcrun', '--sdk', getNameForSdk(sdk), '--show-sdk-path'],
+      <String>[...xcrunCommand(), '--sdk', getSDKNameForIOSEnvironmentType(environmentType), '--show-sdk-path'],
     );
     if (runResult.exitCode != 0) {
       throwToolExit('Could not find SDK location: ${runResult.stderr}');
@@ -190,42 +190,78 @@ class Xcode {
   }
 }
 
+EnvironmentType environmentTypeFromSdkroot(Directory sdkroot) {
+  assert(sdkroot != null);
+  // iPhoneSimulator.sdk or iPhoneOS.sdk
+  final String sdkName = sdkroot.basename.toLowerCase();
+  if (sdkName.contains('iphone')) {
+    return sdkName.contains('simulator') ? EnvironmentType.simulator : EnvironmentType.physical;
+  }
+  assert(false);
+  return null;
+}
+
+enum XCDeviceEvent {
+  attach,
+  detach,
+}
+
 /// A utility class for interacting with Xcode xcdevice command line tools.
 class XCDevice {
   XCDevice({
+    @required Artifacts artifacts,
+    @required Cache cache,
     @required ProcessManager processManager,
     @required Logger logger,
     @required Xcode xcode,
+    @required Platform platform,
+    @required IProxy iproxy,
   }) : _processUtils = ProcessUtils(logger: logger, processManager: processManager),
-       _logger = logger,
-       _xcode = xcode;
+      _logger = logger,
+      _iMobileDevice = IMobileDevice(
+        artifacts: artifacts,
+        cache: cache,
+        logger: logger,
+        processManager: processManager,
+      ),
+      _iosDeploy = IOSDeploy(
+        artifacts: artifacts,
+        cache: cache,
+        logger: logger,
+        platform: platform,
+        processManager: processManager,
+      ),
+      _iProxy = iproxy,
+      _xcode = xcode {
+
+    _setupDeviceIdentifierByEventStream();
+  }
+
+  void dispose() {
+    _deviceObservationProcess?.kill();
+  }
 
   final ProcessUtils _processUtils;
   final Logger _logger;
+  final IMobileDevice _iMobileDevice;
+  final IOSDeploy _iosDeploy;
   final Xcode _xcode;
+  final IProxy _iProxy;
 
-  bool get isInstalled => _xcode.isInstalledAndMeetsVersionCheck && xcdevicePath != null;
+  List<dynamic> _cachedListResults;
+  Process _deviceObservationProcess;
+  StreamController<Map<XCDeviceEvent, String>> _deviceIdentifierByEvent;
 
-  String _xcdevicePath;
-  String get xcdevicePath {
-    if (_xcdevicePath == null) {
-      try {
-        _xcdevicePath = _processUtils.runSync(
-          <String>[
-            'xcrun',
-            '--find',
-            'xcdevice'
-          ],
-          throwOnError: true,
-        ).stdout.trim();
-      } on ProcessException catch (exception) {
-        _logger.printTrace('Process exception finding xcdevice:\n$exception');
-      } on ArgumentError catch (exception) {
-        _logger.printTrace('Argument exception finding xcdevice:\n$exception');
-      }
-    }
-    return _xcdevicePath;
+  void _setupDeviceIdentifierByEventStream() {
+    // _deviceIdentifierByEvent Should always be available for listeners
+    // in case polling needs to be stopped and restarted.
+    _deviceIdentifierByEvent = StreamController<Map<XCDeviceEvent, String>>.broadcast(
+      onListen: _startObservingTetheredIOSDevices,
+      onCancel: _stopObservingTetheredIOSDevices,
+    );
   }
+
+  bool get isInstalled => _xcode.isInstalledAndMeetsVersionCheck;
 
   Future<List<dynamic>> _getAllDevices({
     bool useCache = false,
@@ -242,7 +278,7 @@ class XCDevice {
       // USB-tethered devices should be found quickly. 1 second timeout is faster than the default.
       final RunResult result = await _processUtils.run(
         <String>[
-          'xcrun',
+          ..._xcode.xcrunCommand(),
           'xcdevice',
           'list',
           '--timeout',
@@ -265,11 +301,105 @@ class XCDevice {
     return null;
   }
 
-  List<dynamic> _cachedListResults;
+  /// Observe identifiers (UDIDs) of devices as they attach and detach.
+  ///
+  /// Each attach and detach event is a tuple of one event type
+  /// and identifier.
+  Stream<Map<XCDeviceEvent, String>> observedDeviceEvents() {
+    if (!isInstalled) {
+      _logger.printTrace("Xcode not found. Run 'flutter doctor' for more information.");
+      return null;
+    }
+    return _deviceIdentifierByEvent.stream;
+  }
 
-  /// [timeout] defaults to 1 second.
-  Future<List<IOSDevice>> getAvailableTetheredIOSDevices({ Duration timeout }) async {
-    final List<dynamic> allAvailableDevices = await _getAllDevices(timeout: timeout ?? const Duration(seconds: 1));
+  // Attach: d83d5bc53967baa0ee18626ba87b6254b2ab5418
+  // Attach: 00008027-00192736010F802E
+  // Detach: d83d5bc53967baa0ee18626ba87b6254b2ab5418
+  final RegExp _observationIdentifierPattern = RegExp(r'^(\w*): ([\w-]*)$');
+
+  Future<void> _startObservingTetheredIOSDevices() async {
+    try {
+      if (_deviceObservationProcess != null) {
+        throw Exception('xcdevice observe restart failed');
+      }
+
+      // Run in interactive mode (via script) to convince
+      // xcdevice it has a terminal attached in order to redirect stdout.
+      _deviceObservationProcess = await _processUtils.start(
+        <String>[
+          'script',
+          '-t',
+          '0',
+          '/dev/null',
+          ..._xcode.xcrunCommand(),
+          'xcdevice',
+          'observe',
+          '--both',
+        ],
+      );
+
+      final StreamSubscription<String> stdoutSubscription = _deviceObservationProcess.stdout
+        .transform<String>(utf8.decoder)
+        .transform<String>(const LineSplitter())
+        .listen((String line) {
+
+        // xcdevice observe example output of UDIDs:
+        //
+        // Listening for all devices, on both interfaces.
+        // Attach: d83d5bc53967baa0ee18626ba87b6254b2ab5418
+        // Attach: 00008027-00192736010F802E
+        // Detach: d83d5bc53967baa0ee18626ba87b6254b2ab5418
+        // Attach: d83d5bc53967baa0ee18626ba87b6254b2ab5418
+        final RegExpMatch match = _observationIdentifierPattern.firstMatch(line);
+        if (match != null && match.groupCount == 2) {
+          final String verb = match.group(1).toLowerCase();
+          final String identifier = match.group(2);
+          if (verb.startsWith('attach')) {
+            _deviceIdentifierByEvent.add(<XCDeviceEvent, String>{
+              XCDeviceEvent.attach: identifier
+            });
+          } else if (verb.startsWith('detach')) {
+            _deviceIdentifierByEvent.add(<XCDeviceEvent, String>{
+              XCDeviceEvent.detach: identifier
+            });
+          }
+        }
+      });
+      final StreamSubscription<String> stderrSubscription = _deviceObservationProcess.stderr
+        .transform<String>(utf8.decoder)
+        .transform<String>(const LineSplitter())
+        .listen((String line) {
+        _logger.printTrace('xcdevice observe error: $line');
+      });
+      unawaited(_deviceObservationProcess.exitCode.then((int status) {
+        _logger.printTrace('xcdevice exited with code $exitCode');
+        unawaited(stdoutSubscription.cancel());
+        unawaited(stderrSubscription.cancel());
+      }).whenComplete(() async {
+        if (_deviceIdentifierByEvent.hasListener) {
+          // Tell listeners the process died.
+          await _deviceIdentifierByEvent.close();
+        }
+        _deviceObservationProcess = null;
+
+        // Reopen it so new listeners can resume polling.
+        _setupDeviceIdentifierByEventStream();
+      }));
+    } on ProcessException catch (exception, stackTrace) {
+      _deviceIdentifierByEvent.addError(exception, stackTrace);
+    } on ArgumentError catch (exception, stackTrace) {
+      _deviceIdentifierByEvent.addError(exception, stackTrace);
+    }
+  }
+
+  void _stopObservingTetheredIOSDevices() {
+    _deviceObservationProcess?.kill();
+  }
+
+  /// [timeout] defaults to 2 seconds.
+  Future<List<IOSDevice>> getAvailableIOSDevices({ Duration timeout }) async {
+    final List<dynamic> allAvailableDevices = await _getAllDevices(timeout: timeout ?? const Duration(seconds: 2));
 
     if (allAvailableDevices == null) {
       return const <IOSDevice>[];
@@ -342,8 +472,11 @@ class XCDevice {
         }
       }
 
+      final IOSDeviceInterface interface = _interfaceType(deviceProperties);
+
       // Only support USB devices, skip "network" interface (Xcode > Window > Devices and Simulators > Connect via network).
-      if (!_isUSBTethered(deviceProperties)) {
+      // TODO(jmagman): Remove this check once wirelessly detected devices can be observed and attached, https://github.com/flutter/flutter/issues/15072.
+      if (interface != IOSDeviceInterface.usb) {
         continue;
       }
 
@@ -351,11 +484,13 @@ class XCDevice {
         device['identifier'] as String,
         name: device['name'] as String,
         cpuArchitecture: _cpuArchitecture(deviceProperties),
+        interfaceType: interface,
         sdkVersion: _sdkVersion(deviceProperties),
-        artifacts: globals.artifacts,
+        iProxy: _iProxy,
         fileSystem: globals.fs,
-        logger: globals.logger,
-        iosDeploy: globals.iosDeploy,
+        logger: _logger,
+        iosDeploy: _iosDeploy,
+        iMobileDevice: _iMobileDevice,
         platform: globals.platform,
       ));
     }
@@ -386,10 +521,18 @@ class XCDevice {
     return null;
   }
 
-  static bool _isUSBTethered(Map<String, dynamic> deviceProperties) {
-    // Interface can be "usb", "network", or not present for simulators.
-    return deviceProperties.containsKey('interface') &&
-        (deviceProperties['interface'] as String).toLowerCase() == 'usb';
+  static IOSDeviceInterface _interfaceType(Map<String, dynamic> deviceProperties) {
+    // Interface can be "usb", "network", or "none" for simulators
+    // and unknown future interfaces.
+    if (deviceProperties.containsKey('interface')) {
+      if ((deviceProperties['interface'] as String).toLowerCase() == 'network') {
+        return IOSDeviceInterface.network;
+      } else {
+        return IOSDeviceInterface.usb;
+      }
+    }
+
+    return IOSDeviceInterface.none;
   }
 
   static String _sdkVersion(Map<String, dynamic> deviceProperties) {
@@ -412,8 +555,13 @@ class XCDevice {
       } on Exception {
         // Fallback to default iOS architecture. Future-proof against a
         // theoretical version of Xcode that changes this string to something
-        // slightly different like "ARM64".
-        cpuArchitecture ??= defaultIOSArchs.first;
+        // slightly different like "ARM64", or armv7 variations like
+        // armv7s and armv7f.
+        if (architecture.startsWith('armv7')) {
+          cpuArchitecture = DarwinArch.armv7;
+        } else {
+          cpuArchitecture = DarwinArch.arm64;
+        }
         _logger.printError(
           'Unknown architecture $architecture, defaulting to '
           '${getNameForDarwinArch(cpuArchitecture)}',
@@ -506,7 +654,7 @@ class XCDevice {
   Future<List<String>> getDiagnostics() async {
     final List<dynamic> allAvailableDevices = await _getAllDevices(
       useCache: true,
-      timeout: const Duration(seconds: 1)
+      timeout: const Duration(seconds: 2)
     );
 
     if (allAvailableDevices == null) {
